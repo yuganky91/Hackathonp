@@ -15,6 +15,8 @@ import shap
 import json
 from datetime import datetime
 import base64
+import pickle
+import hashlib
 
 # Set up the page
 st.set_page_config(
@@ -42,12 +44,11 @@ st.markdown('<h1 class="main-header">MediExplain AI</h1>', unsafe_allow_html=Tru
 st.markdown("### Transparent, Trustworthy, and Compliant Disease Risk Prediction")
 
 # Sidebar for navigation
-st.sidebar.image("https://img.icons8.com/dusk/64/000000/hospital.png", width=80)
 st.sidebar.title("Navigation")
 page = st.sidebar.radio("Go to", ["Home", "Predict Disease Risk", "Compliance Center", "Tech & Documentation", "Feedback"])
 
 # Load and preprocess data
-@st.cache_resource
+@st.cache_data
 def load_data():
     # Using the heart disease dataset from UCI (simulated for demo)
     # In a real scenario, this would be loaded from a proper source
@@ -77,7 +78,7 @@ def load_data():
     return df, feature_names
 
 # Train models
-@st.cache_resource
+@st.cache_data
 def train_models(df, feature_names):
     X = df[feature_names]
     y = df['Heart_Disease_Risk']
@@ -107,6 +108,7 @@ def train_models(df, feature_names):
     rf_acc = accuracy_score(y_test, rf_model.predict(X_test))
     xgb_acc = accuracy_score(y_test, xgb_model.predict(X_test))
     
+    # Return only the data that can be safely cached
     return {
         'lr': lr_model,
         'rf': rf_model,
@@ -117,11 +119,11 @@ def train_models(df, feature_names):
         'xgb_acc': xgb_acc,
         'X_train': X_train,
         'X_test': X_test,
-        'y_test': y_test
+        'y_test': y_test,
+        'feature_names': feature_names
     }
 
-# Initialize SHAP explainer
-@st.cache_resource
+# Initialize SHAP explainer - we'll create these on demand instead of caching
 def init_shap_explainer(model, X_train, model_type):
     if model_type == "linear":
         explainer = shap.LinearExplainer(model, X_train)
@@ -138,7 +140,7 @@ def create_shap_plots(explainer, input_data, feature_names, model_type):
         shap_values = explainer(input_data)
     
     # Create plots
-    fig1, ax1 = plt.subplots()
+    fig1, ax1 = plt.subplots(figsize=(10, 6))
     if model_type == "linear":
         shap.summary_plot(shap_values, input_data, feature_names=feature_names, show=False)
     else:
@@ -146,7 +148,7 @@ def create_shap_plots(explainer, input_data, feature_names, model_type):
     plt.tight_layout()
     
     # Create force plot for the specific prediction
-    fig2, ax2 = plt.subplots()
+    fig2, ax2 = plt.subplots(figsize=(10, 4))
     if model_type == "linear":
         shap.force_plot(explainer.expected_value, shap_values, input_data, 
                        feature_names=feature_names, matplotlib=True, show=False)
@@ -159,12 +161,7 @@ def create_shap_plots(explainer, input_data, feature_names, model_type):
 
 # Load data and train models
 df, feature_names = load_data()
-models = train_models(df, feature_names)
-
-# Initialize SHAP explainers
-lr_explainer = init_shap_explainer(models['lr'], models['X_train'], "linear")
-rf_explainer = init_shap_explainer(models['rf'], models['X_train'], "tree")
-xgb_explainer = init_shap_explainer(models['xgb'], models['X_train'], "tree")
+models_data = train_models(df, feature_names)
 
 # Home page
 if page == "Home":
@@ -222,7 +219,7 @@ if page == "Home":
     st.markdown("### Model Performance")
     perf_df = pd.DataFrame({
         'Model': ['Logistic Regression', 'Random Forest', 'XGBoost'],
-        'Accuracy': [models['lr_acc'], models['rf_acc'], models['xgb_acc']]
+        'Accuracy': [models_data['lr_acc'], models_data['rf_acc'], models_data['xgb_acc']]
     })
     
     fig = px.bar(perf_df, x='Model', y='Accuracy', 
@@ -276,20 +273,23 @@ elif page == "Predict Disease Risk":
     
     # Get the selected model
     if "Logistic Regression" in model_option:
-        model = models['lr']
-        explainer = lr_explainer
-        input_processed = models['scaler'].transform(input_data)
+        model = models_data['lr']
+        input_processed = models_data['scaler'].transform(input_data)
         model_type = "linear"
     elif "Random Forest" in model_option:
-        model = models['rf']
-        explainer = rf_explainer
+        model = models_data['rf']
         input_processed = input_data
         model_type = "tree"
     else:
-        model = models['xgb']
-        explainer = xgb_explainer
+        model = models_data['xgb']
         input_processed = input_data
         model_type = "tree"
+    
+    # Initialize explainer on demand
+    if "Logistic Regression" in model_option:
+        explainer = init_shap_explainer(model, models_data['X_train'], "linear")
+    else:
+        explainer = init_shap_explainer(model, models_data['X_train'], "tree")
     
     # Make prediction
     if st.button("Predict Risk"):
@@ -318,7 +318,7 @@ elif page == "Predict Disease Risk":
         st.markdown("The chart below shows which factors contributed most to this prediction:")
         
         # Create SHAP plots
-        fig1, fig2 = create_shap_plots(explainer, input_processed, feature_names, model_type)
+        fig1, fig2 = create_shap_plots(explainer, input_processed, models_data['feature_names'], model_type)
         
         st.pyplot(fig1)
         st.pyplot(fig2)
@@ -367,7 +367,7 @@ elif page == "Predict Disease Risk":
                                  new_bmi, new_exercise, new_smoking, alcohol, stress]])
         
         if "Logistic Regression" in model_option:
-            modified_processed = models['scaler'].transform(modified_data)
+            modified_processed = models_data['scaler'].transform(modified_data)
         else:
             modified_processed = modified_data
         
@@ -559,7 +559,7 @@ elif page == "Tech & Documentation":
         st.markdown("#### Model Comparison")
         comparison_data = {
             'Model': ['Logistic Regression', 'Random Forest', 'XGBoost'],
-            'Accuracy': [models['lr_acc'], models['rf_acc'], models['xgb_acc']],
+            'Accuracy': [models_data['lr_acc'], models_data['rf_acc'], models_data['xgb_acc']],
             'Interpretability': [9, 6, 5],
             'Training Time (s)': [0.5, 3.2, 4.8]
         }
@@ -591,7 +591,7 @@ elif page == "Tech & Documentation":
         
         # Show feature distributions
         st.markdown("#### Feature Distributions")
-        feature_to_show = st.selectbox("Select feature to visualize", feature_names)
+        feature_to_show = st.selectbox("Select feature to visualize", models_data['feature_names'])
         
         fig = px.histogram(df, x=feature_to_show, color='Heart_Disease_Risk',
                            title=f'Distribution of {feature_to_show} by Heart Disease Risk',
@@ -624,17 +624,20 @@ elif page == "Tech & Documentation":
         
         # Interactive SHAP explanation
         st.markdown("##### Interactive SHAP Explanation")
-        sample_idx = st.slider("Select sample to explain", 0, len(models['X_test'])-1, 0)
+        sample_idx = st.slider("Select sample to explain", 0, len(models_data['X_test'])-1, 0)
         
         # Get sample and prediction
-        sample_data = models['X_test'].iloc[sample_idx:sample_idx+1]
-        sample_pred = models['xgb'].predict_proba(sample_data)[0][1]
+        sample_data = models_data['X_test'].iloc[sample_idx:sample_idx+1]
+        sample_pred = models_data['xgb'].predict_proba(sample_data)[0][1]
+        
+        # Initialize explainer
+        xgb_explainer = init_shap_explainer(models_data['xgb'], models_data['X_train'], "tree")
         
         # Calculate SHAP values
         shap_values = xgb_explainer(sample_data)
         
         # Create force plot
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(figsize=(10, 4))
         shap.plots.force(shap_values[0], matplotlib=True, show=False)
         plt.tight_layout()
         st.pyplot(fig)
