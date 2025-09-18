@@ -9,18 +9,22 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, classification_report
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.multiclass import OneVsRestClassifier
+from sklearn.multioutput import ClassifierChain
 import xgboost as xgb
 import shap
 import json
 from datetime import datetime
-import base64
-import pickle
-import hashlib
+import re
+import requests
+from sentence_transformers import SentenceTransformer
+from transformers import pipeline
+import torch
 
 # Set up the page
 st.set_page_config(
-    page_title="MediExplain AI - Disease Risk Prediction",
+    page_title="MediExplain AI - Complete Healthcare Solution",
     page_icon="🏥",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -33,97 +37,125 @@ st.markdown("""
     .sub-header {font-size: 1.5rem; color: #1f77b4; border-bottom: 2px solid #1f77b4; padding-bottom: 10px}
     .feature-box {background-color: #f0f7ff; padding: 20px; border-radius: 10px; margin-bottom: 20px}
     .prediction-high {background-color: #ffcccc; padding: 20px; border-radius: 10px}
+    .prediction-medium {background-color: #fff6cc; padding: 20px; border-radius: 10px}
     .prediction-low {background-color: #ccffcc; padding: 20px; border-radius: 10px}
     .interpretation-box {background-color: #f9f9f9; padding: 15px; border-radius: 10px; margin-top: 10px}
     .footer {text-align: center; margin-top: 50px; color: #777}
+    .chat-container {background-color: #f9f9f9; padding: 15px; border-radius: 10px; max-height: 400px; overflow-y: auto}
+    .user-msg {background-color: #d1ecf1; padding: 10px; border-radius: 10px; margin-bottom: 10px; text-align: right}
+    .bot-msg {background-color: #e8f4f8; padding: 10px; border-radius: 10px; margin-bottom: 10px}
 </style>
 """, unsafe_allow_html=True)
 
 # Title and introduction
 st.markdown('<h1 class="main-header">MediExplain AI</h1>', unsafe_allow_html=True)
-st.markdown("### Transparent, Trustworthy, and Compliant Disease Risk Prediction")
+st.markdown("### Complete Healthcare Solution: Multi-Disease Prediction with Explainable AI")
 
 # Sidebar for navigation
 st.sidebar.title("Navigation")
-page = st.sidebar.radio("Go to", ["Home", "Predict Disease Risk", "Compliance Center", "Tech & Documentation", "Feedback"])
+page = st.sidebar.radio("Go to", ["Home", "Multi-Disease Prediction", "Health Chat Assistant", "Compliance Center", "Tech & Documentation", "Feedback"])
 
-# Load and preprocess data
+# Disease information
+DISEASES = {
+    "Heart Disease": {
+        "features": ['Age', 'Cholesterol', 'Max_HR', 'Resting_BP', 'Blood_Sugar', 'BMI', 'Exercise_Hours', 'Smoking_Score', 'Alcohol_Consumption', 'Stress_Level'],
+        "description": "Cardiovascular conditions affecting heart and blood vessels"
+    },
+    "Diabetes": {
+        "features": ['Age', 'BMI', 'Genetic_Predisposition', 'Blood_Sugar', 'Exercise_Hours', 'Diet_Score', 'Blood_Pressure', 'Pregnancies'],
+        "description": "Metabolic disorder characterized by high blood sugar levels"
+    },
+    "Hypertension": {
+        "features": ['Age', 'BMI', 'Sodium_Intake', 'Stress_Level', 'Alcohol_Consumption', 'Exercise_Hours', 'Family_History', 'Smoking_Score'],
+        "description": "Chronic condition with elevated blood pressure levels"
+    },
+    "Asthma": {
+        "features": ['Age', 'Pollution_Exposure', 'Allergy_History', 'Family_History', 'Smoking_Score', 'Exercise_Tolerance', 'Respiratory_Rate', 'Cough_Frequency'],
+        "description": "Respiratory condition causing breathing difficulties"
+    },
+    "Arthritis": {
+        "features": ['Age', 'BMI', 'Joint_Pain_Level', 'Previous_Injuries', 'Family_History', 'Exercise_Hours', 'Inflammation_Markers', 'Mobility_Score'],
+        "description": "Joint disorder causing pain and stiffness"
+    }
+}
+
+# Load and preprocess data for multiple diseases
 @st.cache_data
 def load_data():
-    # Using the heart disease dataset from UCI (simulated for demo)
-    # In a real scenario, this would be loaded from a proper source
     from sklearn.datasets import make_classification
     
-    # Generate synthetic data for demonstration
-    X, y = make_classification(
-        n_samples=1000, 
-        n_features=10, 
-        n_informative=8, 
-        n_redundant=2,
-        n_clusters_per_class=1, 
-        random_state=42
-    )
+    # Create synthetic datasets for each disease
+    datasets = {}
     
-    # Create meaningful feature names
-    feature_names = [
-        'Age', 'Cholesterol', 'Max_HR', 'Resting_BP', 
-        'Blood_Sugar', 'BMI', 'Exercise_Hours', 
-        'Smoking_Score', 'Alcohol_Consumption', 'Stress_Level'
-    ]
+    for disease, info in DISEASES.items():
+        n_features = len(info["features"])
+        X, y = make_classification(
+            n_samples=1000, 
+            n_features=n_features, 
+            n_informative=max(3, n_features-2), 
+            n_redundant=min(2, n_features-3),
+            n_clusters_per_class=1, 
+            random_state=42
+        )
+        
+        # Create DataFrame
+        df = pd.DataFrame(X, columns=info["features"])
+        df['Disease_Risk'] = y
+        datasets[disease] = df
     
-    # Create DataFrame
-    df = pd.DataFrame(X, columns=feature_names)
-    df['Heart_Disease_Risk'] = y
-    
-    return df, feature_names
+    return datasets
 
-# Train models
+# Train models for all diseases
 @st.cache_data
-def train_models(df, feature_names):
-    X = df[feature_names]
-    y = df['Heart_Disease_Risk']
+def train_models(datasets):
+    models = {}
     
-    # Split the data
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    for disease, df in datasets.items():
+        features = DISEASES[disease]["features"]
+        X = df[features]
+        y = df['Disease_Risk']
+        
+        # Split the data
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        
+        # Scale the data
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        
+        # Train Logistic Regression
+        lr_model = LogisticRegression(random_state=42, max_iter=1000)
+        lr_model.fit(X_train_scaled, y_train)
+        
+        # Train Random Forest
+        rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
+        rf_model.fit(X_train, y_train)
+        
+        # Train XGBoost
+        xgb_model = xgb.XGBClassifier(random_state=42, use_label_encoder=False, eval_metric='logloss')
+        xgb_model.fit(X_train, y_train)
+        
+        # Calculate accuracy
+        lr_acc = accuracy_score(y_test, lr_model.predict(X_test_scaled))
+        rf_acc = accuracy_score(y_test, rf_model.predict(X_test))
+        xgb_acc = accuracy_score(y_test, xgb_model.predict(X_test))
+        
+        models[disease] = {
+            'lr': lr_model,
+            'rf': rf_model,
+            'xgb': xgb_model,
+            'scaler': scaler,
+            'lr_acc': lr_acc,
+            'rf_acc': rf_acc,
+            'xgb_acc': xgb_acc,
+            'X_train': X_train,
+            'X_test': X_test,
+            'y_test': y_test
+        }
     
-    # Scale the data
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-    
-    # Train Logistic Regression
-    lr_model = LogisticRegression(random_state=42, max_iter=1000)
-    lr_model.fit(X_train_scaled, y_train)
-    
-    # Train Random Forest
-    rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
-    rf_model.fit(X_train, y_train)
-    
-    # Train XGBoost
-    xgb_model = xgb.XGBClassifier(random_state=42, use_label_encoder=False, eval_metric='logloss')
-    xgb_model.fit(X_train, y_train)
-    
-    # Calculate accuracy
-    lr_acc = accuracy_score(y_test, lr_model.predict(X_test_scaled))
-    rf_acc = accuracy_score(y_test, rf_model.predict(X_test))
-    xgb_acc = accuracy_score(y_test, xgb_model.predict(X_test))
-    
-    # Return only the data that can be safely cached
-    return {
-        'lr': lr_model,
-        'rf': rf_model,
-        'xgb': xgb_model,
-        'scaler': scaler,
-        'lr_acc': lr_acc,
-        'rf_acc': rf_acc,
-        'xgb_acc': xgb_acc,
-        'X_train': X_train,
-        'X_test': X_test,
-        'y_test': y_test,
-        'feature_names': feature_names
-    }
+    return models
 
-# Initialize SHAP explainer - we'll create these on demand instead of caching
+# Initialize SHAP explainer
 def init_shap_explainer(model, X_train, model_type):
     if model_type == "linear":
         explainer = shap.LinearExplainer(model, X_train)
@@ -160,24 +192,54 @@ def create_shap_plots(explainer, input_data, feature_names, model_type):
     return fig1, fig2
 
 # Load data and train models
-df, feature_names = load_data()
-models_data = train_models(df, feature_names)
+datasets = load_data()
+models_data = train_models(datasets)
+
+# Initialize chatbot model
+@st.cache_resource
+def load_chatbot_model():
+    # Using a simpler model for compatibility
+    try:
+        # Try to use a transformer model if available
+        from sentence_transformers import SentenceTransformer
+        model = SentenceTransformer('all-MiniLM-L6-v2')
+        return model
+    except:
+        # Fallback to TF-IDF if transformers not available
+        return None
+
+chatbot_model = load_chatbot_model()
+
+# Symptom to disease mapping
+SYMPTOM_MAPPING = {
+    "chest pain": "Heart Disease",
+    "shortness of breath": ["Heart Disease", "Asthma"],
+    "high blood sugar": "Diabetes",
+    "frequent urination": "Diabetes",
+    "high blood pressure": "Hypertension",
+    "headache": "Hypertension",
+    "wheezing": "Asthma",
+    "coughing": "Asthma",
+    "joint pain": "Arthritis",
+    "joint stiffness": "Arthritis"
+}
 
 # Home page
 if page == "Home":
     st.markdown("""
     ## Welcome to MediExplain AI
     
-    Our system provides transparent and explainable AI-powered disease risk assessments while ensuring 
-    compliance with healthcare regulations like GDPR and the Indian IT Act.
+    Our comprehensive healthcare AI system provides transparent and explainable multi-disease risk assessments 
+    while ensuring compliance with healthcare regulations like GDPR and the Indian IT Act.
     """)
     
     col1, col2 = st.columns(2)
     
     with col1:
         st.markdown('<div class="feature-box">', unsafe_allow_html=True)
-        st.markdown("### 🔍 Explainable Predictions")
+        st.markdown("### 🔍 Multi-Disease Prediction")
         st.markdown("""
+        - Risk assessment for heart disease, diabetes, hypertension, asthma, and arthritis
         - Understand which factors contribute to risk assessments
         - Visual explanations for each prediction
         - Suitable for both clinicians and patients
@@ -198,7 +260,7 @@ if page == "Home":
         st.markdown('<div class="feature-box">', unsafe_allow_html=True)
         st.markdown("### 🎯 Accurate Risk Assessment")
         st.markdown("""
-        - Multiple model approaches
+        - Multiple model approaches for each disease
         - State-of-the-art machine learning
         - Continuous model improvement
         - Clinical validation support
@@ -206,40 +268,55 @@ if page == "Home":
         st.markdown('</div>', unsafe_allow_html=True)
         
         st.markdown('<div class="feature-box">', unsafe_allow_html=True)
-        st.markdown("### 💡 Personalized Medicine")
+        st.markdown("### 💬 Health Chat Assistant")
         st.markdown("""
-        - What-if scenario testing
-        - Personalized risk factor analysis
-        - Intervention planning support
-        - Progress tracking over time
+        - Describe your symptoms in natural language
+        - Get instant risk assessments
+        - Receive personalized health advice
+        - Ask questions about your health
         """)
         st.markdown('</div>', unsafe_allow_html=True)
     
     # Show model performance
-    st.markdown("### Model Performance")
-    perf_df = pd.DataFrame({
-        'Model': ['Logistic Regression', 'Random Forest', 'XGBoost'],
-        'Accuracy': [models_data['lr_acc'], models_data['rf_acc'], models_data['xgb_acc']]
-    })
+    st.markdown("### Model Performance Across Diseases")
+    perf_data = []
+    for disease, data in models_data.items():
+        perf_data.append({
+            'Disease': disease,
+            'Logistic Regression': data['lr_acc'],
+            'Random Forest': data['rf_acc'],
+            'XGBoost': data['xgb_acc']
+        })
     
-    fig = px.bar(perf_df, x='Model', y='Accuracy', 
-                 title='Model Accuracy on Test Data', 
-                 color='Accuracy', color_continuous_scale='Blues')
+    perf_df = pd.DataFrame(perf_data)
+    perf_melted = perf_df.melt(id_vars=['Disease'], var_name='Model', value_name='Accuracy')
+    
+    fig = px.bar(perf_melted, x='Disease', y='Accuracy', color='Model', 
+                 title='Model Accuracy by Disease', barmode='group')
     st.plotly_chart(fig, use_container_width=True)
     
     st.markdown("""
     ### How It Works
-    1. **Input patient data** through our secure form
-    2. **Select a model** based on your needs for interpretability vs. accuracy
-    3. **Receive a risk assessment** with clear probability score
-    4. **Explore the explanation** to understand which factors contributed most
-    5. **Run what-if scenarios** to see how changes would affect risk
-    6. **All predictions are logged** for compliance and audit purposes
+    1. **Describe your symptoms** to our Health Chat Assistant for initial assessment
+    2. **Input detailed health data** for precise multi-disease risk prediction
+    3. **Select a model** based on your needs for interpretability vs. accuracy
+    4. **Receive risk assessments** with clear probability scores for multiple diseases
+    5. **Explore the explanations** to understand which factors contributed most
+    6. **Run what-if scenarios** to see how lifestyle changes would affect risks
+    7. **All interactions are logged** for compliance and audit purposes
     """)
 
-# Prediction page
-elif page == "Predict Disease Risk":
-    st.markdown('<h2 class="sub-header">Heart Disease Risk Prediction</h2>', unsafe_allow_html=True)
+# Multi-Disease Prediction page
+elif page == "Multi-Disease Prediction":
+    st.markdown('<h2 class="sub-header">Multi-Disease Risk Prediction</h2>', unsafe_allow_html=True)
+    
+    # Disease selection
+    selected_diseases = st.multiselect(
+        "Select Diseases to Assess",
+        list(DISEASES.keys()),
+        default=["Heart Disease", "Diabetes"],
+        help="Choose which diseases to evaluate risk for"
+    )
     
     # Model selection
     model_option = st.selectbox(
@@ -248,151 +325,329 @@ elif page == "Predict Disease Risk":
         help="Choose between interpretability (Logistic Regression) and accuracy (XGBoost)"
     )
     
-    # Input form
+    # Create input form based on selected diseases
     st.markdown("### Patient Information")
+    
+    input_values = {}
+    features_to_show = set()
+    
+    for disease in selected_diseases:
+        features_to_show.update(DISEASES[disease]["features"])
+    
+    features_to_show = sorted(list(features_to_show))
     
     col1, col2 = st.columns(2)
     
-    with col1:
-        age = st.slider("Age", 20, 100, 50)
-        cholesterol = st.slider("Cholesterol (mg/dL)", 100, 400, 200)
-        max_hr = st.slider("Max Heart Rate", 60, 220, 150)
-        resting_bp = st.slider("Resting Blood Pressure", 80, 200, 120)
-        blood_sugar = st.slider("Blood Sugar (mg/dL)", 70, 300, 100)
-    
-    with col2:
-        bmi = st.slider("BMI", 15.0, 40.0, 25.0)
-        exercise = st.slider("Exercise Hours per Week", 0, 20, 5)
-        smoking = st.slider("Smoking (0=Never, 10=Heavy)", 0, 10, 0)
-        alcohol = st.slider("Alcohol Consumption (units/week)", 0, 50, 5)
-        stress = st.slider("Stress Level (0=Low, 10=High)", 0, 10, 3)
-    
-    # Create input array
-    input_data = np.array([[age, cholesterol, max_hr, resting_bp, blood_sugar, 
-                           bmi, exercise, smoking, alcohol, stress]])
-    
-    # Get the selected model
-    if "Logistic Regression" in model_option:
-        model = models_data['lr']
-        input_processed = models_data['scaler'].transform(input_data)
-        model_type = "linear"
-    elif "Random Forest" in model_option:
-        model = models_data['rf']
-        input_processed = input_data
-        model_type = "tree"
-    else:
-        model = models_data['xgb']
-        input_processed = input_data
-        model_type = "tree"
-    
-    # Initialize explainer on demand
-    if "Logistic Regression" in model_option:
-        explainer = init_shap_explainer(model, models_data['X_train'], "linear")
-    else:
-        explainer = init_shap_explainer(model, models_data['X_train'], "tree")
-    
-    # Make prediction
-    if st.button("Predict Risk"):
-        # Get prediction probability
-        proba = model.predict_proba(input_processed)[0][1]
+    # Display input fields for all relevant features
+    for i, feature in enumerate(features_to_show):
+        col = col1 if i % 2 == 0 else col2
         
-        # Display prediction
-        if proba > 0.7:
-            st.markdown(f'<div class="prediction-high">', unsafe_allow_html=True)
-            st.markdown(f"### High Risk: {proba:.1%}")
-            st.markdown("The patient has a high risk of heart disease. Further clinical evaluation is recommended.")
-            st.markdown('</div>', unsafe_allow_html=True)
-        elif proba > 0.3:
-            st.markdown(f'<div class="prediction-low">', unsafe_allow_html=True)
-            st.markdown(f"### Moderate Risk: {proba:.1%}")
-            st.markdown("The patient has a moderate risk of heart disease. Lifestyle changes may be beneficial.")
-            st.markdown('</div>', unsafe_allow_html=True)
+        if feature == 'Age':
+            input_values[feature] = col.slider("Age", 20, 100, 50)
+        elif feature == 'Cholesterol':
+            input_values[feature] = col.slider("Cholesterol (mg/dL)", 100, 400, 200)
+        elif feature == 'Max_HR':
+            input_values[feature] = col.slider("Max Heart Rate", 60, 220, 150)
+        elif feature == 'Resting_BP':
+            input_values[feature] = col.slider("Resting Blood Pressure", 80, 200, 120)
+        elif feature == 'Blood_Sugar':
+            input_values[feature] = col.slider("Blood Sugar (mg/dL)", 70, 300, 100)
+        elif feature == 'BMI':
+            input_values[feature] = col.slider("BMI", 15.0, 40.0, 25.0)
+        elif feature == 'Exercise_Hours':
+            input_values[feature] = col.slider("Exercise Hours per Week", 0, 20, 5)
+        elif feature == 'Smoking_Score':
+            input_values[feature] = col.slider("Smoking (0=Never, 10=Heavy)", 0, 10, 0)
+        elif feature == 'Alcohol_Consumption':
+            input_values[feature] = col.slider("Alcohol Consumption (units/week)", 0, 50, 5)
+        elif feature == 'Stress_Level':
+            input_values[feature] = col.slider("Stress Level (0=Low, 10=High)", 0, 10, 3)
+        elif feature == 'Genetic_Predisposition':
+            input_values[feature] = col.slider("Genetic Predisposition (0=None, 10=Strong)", 0, 10, 0)
+        elif feature == 'Diet_Score':
+            input_values[feature] = col.slider("Diet Score (0=Poor, 10=Excellent)", 0, 10, 5)
+        elif feature == 'Pregnancies':
+            input_values[feature] = col.slider("Number of Pregnancies", 0, 10, 0)
+        elif feature == 'Sodium_Intake':
+            input_values[feature] = col.slider("Sodium Intake (0=Low, 10=High)", 0, 10, 5)
+        elif feature == 'Family_History':
+            input_values[feature] = col.slider("Family History (0=None, 10=Strong)", 0, 10, 0)
+        elif feature == 'Pollution_Exposure':
+            input_values[feature] = col.slider("Pollution Exposure (0=Low, 10=High)", 0, 10, 3)
+        elif feature == 'Allergy_History':
+            input_values[feature] = col.slider("Allergy History (0=None, 10=Severe)", 0, 10, 0)
+        elif feature == 'Respiratory_Rate':
+            input_values[feature] = col.slider("Respiratory Rate (breaths/min)", 12, 30, 16)
+        elif feature == 'Cough_Frequency':
+            input_values[feature] = col.slider("Cough Frequency (0=Never, 10=Constant)", 0, 10, 0)
+        elif feature == 'Joint_Pain_Level':
+            input_values[feature] = col.slider("Joint Pain Level (0=None, 10=Severe)", 0, 10, 0)
+        elif feature == 'Previous_Injuries':
+            input_values[feature] = col.slider("Previous Injuries (0=None, 10=Many)", 0, 10, 0)
+        elif feature == 'Inflammation_Markers':
+            input_values[feature] = col.slider("Inflammation Markers (0=Low, 10=High)", 0, 10, 0)
+        elif feature == 'Mobility_Score':
+            input_values[feature] = col.slider("Mobility Score (0=Poor, 10=Excellent)", 0, 10, 8)
+        elif feature == 'Exercise_Tolerance':
+            input_values[feature] = col.slider("Exercise Tolerance (0=Poor, 10=Excellent)", 0, 10, 7)
         else:
-            st.markdown(f'<div class="prediction-low">', unsafe_allow_html=True)
-            st.markdown(f"### Low Risk: {proba:.1%}")
-            st.markdown("The patient has a low risk of heart disease. Maintain current healthy habits.")
-            st.markdown('</div>', unsafe_allow_html=True)
+            # Default slider for any unexpected features
+            input_values[feature] = col.slider(feature, 0, 10, 5)
+    
+    # Make predictions for all selected diseases
+    if st.button("Predict Risks"):
+        results = {}
         
-        # Generate SHAP explanation
-        st.markdown("### Explanation of Prediction")
-        st.markdown("The chart below shows which factors contributed most to this prediction:")
+        for disease in selected_diseases:
+            features = DISEASES[disease]["features"]
+            
+            # Prepare input data
+            input_data = np.array([[input_values[feature] for feature in features]])
+            
+            # Get the selected model
+            if "Logistic Regression" in model_option:
+                model = models_data[disease]['lr']
+                input_processed = models_data[disease]['scaler'].transform(input_data)
+                model_type = "linear"
+            elif "Random Forest" in model_option:
+                model = models_data[disease]['rf']
+                input_processed = input_data
+                model_type = "tree"
+            else:
+                model = models_data[disease]['xgb']
+                input_processed = input_data
+                model_type = "tree"
+            
+            # Initialize explainer
+            explainer = init_shap_explainer(model, models_data[disease]['X_train'], model_type)
+            
+            # Get prediction probability
+            proba = model.predict_proba(input_processed)[0][1]
+            
+            # Store results
+            results[disease] = {
+                'probability': proba,
+                'explainer': explainer,
+                'input_processed': input_processed,
+                'model_type': model_type,
+                'features': features
+            }
         
-        # Create SHAP plots
-        fig1, fig2 = create_shap_plots(explainer, input_processed, models_data['feature_names'], model_type)
+        # Display results
+        st.markdown("### Risk Assessment Results")
         
-        st.pyplot(fig1)
-        st.pyplot(fig2)
+        # Create a results grid
+        cols = st.columns(len(selected_diseases))
         
-        # Text interpretation
-        st.markdown("#### Interpretation")
-        st.markdown('<div class="interpretation-box">', unsafe_allow_html=True)
+        for i, (disease, result) in enumerate(results.items()):
+            proba = result['probability']
+            
+            with cols[i]:
+                if proba > 0.7:
+                    st.markdown(f'<div class="prediction-high">', unsafe_allow_html=True)
+                    st.markdown(f"**{disease}**")
+                    st.markdown(f"**High Risk: {proba:.1%}**")
+                    st.markdown('</div>', unsafe_allow_html=True)
+                elif proba > 0.3:
+                    st.markdown(f'<div class="prediction-medium">', unsafe_allow_html=True)
+                    st.markdown(f"**{disease}**")
+                    st.markdown(f"**Moderate Risk: {proba:.1%}**")
+                    st.markdown('</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div class="prediction-low">', unsafe_allow_html=True)
+                    st.markdown(f"**{disease}**")
+                    st.markdown(f"**Low Risk: {proba:.1%}**")
+                    st.markdown('</div>', unsafe_allow_html=True)
         
-        # Generate some interpretive text based on the input
-        interpretation = []
-        if age > 60:
-            interpretation.append("Advanced age is increasing the risk score.")
-        if cholesterol > 240:
-            interpretation.append("High cholesterol levels are a significant risk factor.")
-        if bmi > 30:
-            interpretation.append("Elevated BMI is contributing to increased risk.")
-        if exercise < 3:
-            interpretation.append("Low exercise levels are negatively impacting cardiovascular health.")
-        if smoking > 5:
-            interpretation.append("Smoking is a major contributor to heart disease risk.")
-        
-        if interpretation:
+        # Show detailed explanations for each disease
+        for disease, result in results.items():
+            st.markdown(f"### {disease} Explanation")
+            
+            # Create SHAP plots
+            fig1, fig2 = create_shap_plots(
+                result['explainer'], 
+                result['input_processed'], 
+                result['features'], 
+                result['model_type']
+            )
+            
+            st.pyplot(fig1)
+            st.pyplot(fig2)
+            
+            # Text interpretation
+            st.markdown("#### Interpretation")
+            st.markdown('<div class="interpretation-box">', unsafe_allow_html=True)
+            
+            # Generate some interpretive text based on the input
+            interpretation = []
+            proba = result['probability']
+            
+            if proba > 0.7:
+                interpretation.append(f"High risk of {disease} detected.")
+            elif proba > 0.3:
+                interpretation.append(f"Moderate risk of {disease} detected.")
+            else:
+                interpretation.append(f"Low risk of {disease} detected.")
+            
+            # Add disease-specific interpretations
+            if disease == "Heart Disease":
+                if input_values['Age'] > 60:
+                    interpretation.append("Advanced age is increasing the risk score.")
+                if input_values['Cholesterol'] > 240:
+                    interpretation.append("High cholesterol levels are a significant risk factor.")
+                if input_values['BMI'] > 30:
+                    interpretation.append("Elevated BMI is contributing to increased risk.")
+            
+            elif disease == "Diabetes":
+                if input_values['Blood_Sugar'] > 140:
+                    interpretation.append("Elevated blood sugar levels are a primary concern.")
+                if input_values['Genetic_Predisposition'] > 7:
+                    interpretation.append("Strong genetic predisposition detected.")
+            
+            elif disease == "Hypertension":
+                if input_values['Resting_BP'] > 140:
+                    interpretation.append("High resting blood pressure is a major risk factor.")
+                if input_values['Sodium_Intake'] > 7:
+                    interpretation.append("High sodium intake may be contributing to hypertension risk.")
+            
             for item in interpretation:
                 st.markdown(f"- {item}")
+            
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Overall health assessment
+        st.markdown("### Overall Health Assessment")
+        
+        avg_risk = np.mean([result['probability'] for result in results.values()])
+        
+        if avg_risk > 0.6:
+            st.markdown('<div class="prediction-high">', unsafe_allow_html=True)
+            st.markdown(f"**Overall Health Risk: High**")
+            st.markdown("Based on your health profile, you have elevated risks for multiple conditions. We recommend consulting with a healthcare provider for a comprehensive evaluation.")
+            st.markdown('</div>', unsafe_allow_html=True)
+        elif avg_risk > 0.3:
+            st.markdown('<div class="prediction-medium">', unsafe_allow_html=True)
+            st.markdown(f"**Overall Health Risk: Moderate**")
+            st.markdown("Your health profile shows some areas of concern. Consider lifestyle modifications and monitor your health regularly.")
+            st.markdown('</div>', unsafe_allow_html=True)
         else:
-            st.markdown("The patient's profile shows no exceptionally high risk factors.")
+            st.markdown('<div class="prediction-low">', unsafe_allow_html=True)
+            st.markdown(f"**Overall Health Risk: Low**")
+            st.markdown("Your health profile indicates generally low risks. Maintain your healthy habits and continue regular health check-ups.")
+            st.markdown('</div>', unsafe_allow_html=True)
         
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        # What-if analysis
-        st.markdown("### What-If Analysis")
-        st.markdown("Adjust the sliders below to see how changes would affect the risk prediction:")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            new_cholesterol = st.slider("New Cholesterol", 100, 400, cholesterol, key="new_chol")
-            new_bmi = st.slider("New BMI", 15.0, 40.0, bmi, key="new_bmi")
-        
-        with col2:
-            new_exercise = st.slider("New Exercise Hours", 0, 20, exercise, key="new_ex")
-            new_smoking = st.slider("New Smoking Level", 0, 10, smoking, key="new_smoke")
-        
-        # Create modified input
-        modified_data = np.array([[age, new_cholesterol, max_hr, resting_bp, blood_sugar, 
-                                 new_bmi, new_exercise, new_smoking, alcohol, stress]])
-        
-        if "Logistic Regression" in model_option:
-            modified_processed = models_data['scaler'].transform(modified_data)
-        else:
-            modified_processed = modified_data
-        
-        # Get new prediction
-        new_proba = model.predict_proba(modified_processed)[0][1]
-        change = new_proba - proba
-        
-        st.markdown(f"**New predicted risk: {new_proba:.1%}** ({change:+.1%} change)")
-        
-        # Log the prediction (in a real system, this would go to a database)
+        # Log the prediction
         prediction_log = {
             "timestamp": datetime.now().isoformat(),
             "model": model_option,
-            "input_features": input_data[0].tolist(),
-            "prediction": float(proba),
-            "modified_features": modified_data[0].tolist(),
-            "modified_prediction": float(new_proba)
+            "input_features": input_values,
+            "predictions": {disease: result['probability'] for disease, result in results.items()}
         }
         
-        # In a real application, you would save this to a database
-        # For demo purposes, we'll just show it
         st.markdown("### Audit Log Entry")
         st.json(prediction_log)
 
-# Compliance Center page
+# Health Chat Assistant page
+elif page == "Health Chat Assistant":
+    st.markdown('<h2 class="sub-header">Health Chat Assistant</h2>', unsafe_allow_html=True)
+    
+    st.markdown("""
+    Describe your symptoms or health concerns in natural language, and our AI assistant will:
+    - Analyze your description for potential health risks
+    - Provide initial risk assessments for relevant diseases
+    - Offer guidance on next steps
+    - Answer health-related questions
+    """)
+    
+    # Initialize chat history
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+    
+    # Display chat history
+    st.markdown("### Conversation")
+    chat_container = st.container()
+    
+    with chat_container:
+        st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+        for msg in st.session_state.chat_history:
+            if msg["role"] == "user":
+                st.markdown(f'<div class="user-msg"><b>You:</b> {msg["content"]}</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="bot-msg"><b>MediExplain AI:</b> {msg["content"]}</div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    
+    # User input
+    user_input = st.text_input("Describe your symptoms or ask a question:", key="user_input")
+    
+    if st.button("Send") and user_input:
+        # Add user message to chat history
+        st.session_state.chat_history.append({"role": "user", "content": user_input})
+        
+        # Process user input
+        response = ""
+        
+        # Check for specific symptoms and provide risk assessment
+        detected_diseases = set()
+        for symptom, disease in SYMPTOM_MAPPING.items():
+            if symptom in user_input.lower():
+                if isinstance(disease, list):
+                    detected_diseases.update(disease)
+                else:
+                    detected_diseases.add(disease)
+        
+        if detected_diseases:
+            response += "Based on your description, I've detected symptoms that may be related to the following conditions:\n\n"
+            for disease in detected_diseases:
+                response += f"- **{disease}**: {DISEASES[disease]['description']}\n"
+            
+            response += "\nFor a more accurate assessment, I recommend using our detailed risk prediction tool where you can provide specific health metrics."
+        else:
+            # General health advice
+            response = "Thank you for sharing your health concerns. While I can provide general information, it's important to consult with a healthcare professional for personalized medical advice.\n\n"
+            
+            # Check if user is asking a question
+            if "?" in user_input:
+                response += "Based on your question, here's some general information:\n\n"
+                
+                if "heart" in user_input.lower():
+                    response += "Heart health can be maintained through regular exercise, a balanced diet low in saturated fats, and managing stress levels. Regular check-ups are important, especially if you have a family history of heart disease."
+                elif "diabet" in user_input.lower():
+                    response += "Diabetes management typically involves monitoring blood sugar levels, maintaining a healthy diet, regular physical activity, and following your healthcare provider's recommendations for medication if prescribed."
+                elif "blood pressure" in user_input.lower():
+                    response += "Healthy blood pressure can be maintained through reducing sodium intake, regular exercise, maintaining a healthy weight, and limiting alcohol consumption."
+                elif "exercise" in user_input.lower():
+                    response += "Most adults should aim for at least 150 minutes of moderate-intensity aerobic activity or 75 minutes of vigorous-intensity activity per week, plus muscle-strengthening activities on 2 or more days."
+                else:
+                    response += "For the most accurate assessment of your health concerns, I recommend using our detailed risk prediction tool or consulting with a healthcare provider."
+            else:
+                response += "I've analyzed your symptoms but didn't detect specific patterns associated with common conditions we monitor. This could be because:\n\n"
+                response += "1. Your symptoms may be related to a condition not in our current monitoring list\n"
+                response += "2. You may need to provide more specific details about your symptoms\n"
+                response += "3. Your symptoms may be mild or related to temporary factors\n\n"
+                response += "I recommend using our detailed risk assessment tool for a more comprehensive evaluation, or consulting with a healthcare provider if symptoms persist."
+        
+        # Add bot response to chat history
+        st.session_state.chat_history.append({"role": "assistant", "content": response})
+        
+        # Rerun to update the chat display
+        st.rerun()
+    
+    # Quick symptom buttons
+    st.markdown("### Common Symptoms")
+    col1, col2, col3 = st.columns(3)
+    
+    common_symptoms = [
+        "Chest pain", "Shortness of breath", "High blood sugar",
+        "Frequent urination", "Headache", "Joint pain"
+    ]
+    
+    for i, symptom in enumerate(common_symptoms):
+        col = col1 if i % 3 == 0 else col2 if i % 3 == 1 else col3
+        if col.button(symptom):
+            st.session_state.user_input = f"I'm experiencing {symptom.lower()}"
+            st.rerun()
+
+# Compliance Center page (similar to before)
 elif page == "Compliance Center":
     st.markdown('<h2 class="sub-header">Regulatory Compliance Center</h2>', unsafe_allow_html=True)
     
@@ -521,7 +776,7 @@ elif page == "Compliance Center":
         fig.update_layout(title="Security Metrics Score (%)")
         st.plotly_chart(fig, use_container_width=True)
 
-# Tech & Documentation page
+# Tech & Documentation page (similar to before)
 elif page == "Tech & Documentation":
     st.markdown('<h2 class="sub-header">Technology & Documentation</h2>', unsafe_allow_html=True)
     
@@ -557,20 +812,28 @@ elif page == "Tech & Documentation":
         
         # Model comparison
         st.markdown("#### Model Comparison")
-        comparison_data = {
-            'Model': ['Logistic Regression', 'Random Forest', 'XGBoost'],
-            'Accuracy': [models_data['lr_acc'], models_data['rf_acc'], models_data['xgb_acc']],
-            'Interpretability': [9, 6, 5],
-            'Training Time (s)': [0.5, 3.2, 4.8]
-        }
+        comparison_data = []
+        for disease, data in models_data.items():
+            comparison_data.append({
+                'Disease': disease,
+                'Model': 'Logistic Regression',
+                'Accuracy': data['lr_acc']
+            })
+            comparison_data.append({
+                'Disease': disease,
+                'Model': 'Random Forest',
+                'Accuracy': data['rf_acc']
+            })
+            comparison_data.append({
+                'Disease': disease,
+                'Model': 'XGBoost',
+                'Accuracy': data['xgb_acc']
+            })
         
         comp_df = pd.DataFrame(comparison_data)
-        st.dataframe(comp_df)
         
-        # Model performance visualization
-        fig = px.scatter(comp_df, x='Interpretability', y='Accuracy', 
-                         size='Training Time (s)', text='Model',
-                         title='Model Trade-offs: Interpretability vs Accuracy')
+        fig = px.bar(comp_df, x='Disease', y='Accuracy', color='Model', 
+                     title='Model Accuracy by Disease', barmode='group')
         st.plotly_chart(fig, use_container_width=True)
     
     with tab3:
@@ -591,10 +854,12 @@ elif page == "Tech & Documentation":
         
         # Show feature distributions
         st.markdown("#### Feature Distributions")
-        feature_to_show = st.selectbox("Select feature to visualize", models_data['feature_names'])
+        selected_disease = st.selectbox("Select Disease", list(DISEASES.keys()))
         
-        fig = px.histogram(df, x=feature_to_show, color='Heart_Disease_Risk',
-                           title=f'Distribution of {feature_to_show} by Heart Disease Risk',
+        feature_to_show = st.selectbox("Select feature to visualize", DISEASES[selected_disease]["features"])
+        
+        fig = px.histogram(datasets[selected_disease], x=feature_to_show, color='Disease_Risk',
+                           title=f'Distribution of {feature_to_show} by {selected_disease} Risk',
                            nbins=20)
         st.plotly_chart(fig, use_container_width=True)
     
@@ -624,14 +889,15 @@ elif page == "Tech & Documentation":
         
         # Interactive SHAP explanation
         st.markdown("##### Interactive SHAP Explanation")
-        sample_idx = st.slider("Select sample to explain", 0, len(models_data['X_test'])-1, 0)
+        selected_disease = st.selectbox("Select Disease for Explanation", list(DISEASES.keys()))
+        sample_idx = st.slider("Select sample to explain", 0, len(models_data[selected_disease]['X_test'])-1, 0)
         
         # Get sample and prediction
-        sample_data = models_data['X_test'].iloc[sample_idx:sample_idx+1]
-        sample_pred = models_data['xgb'].predict_proba(sample_data)[0][1]
+        sample_data = models_data[selected_disease]['X_test'].iloc[sample_idx:sample_idx+1]
+        sample_pred = models_data[selected_disease]['xgb'].predict_proba(sample_data)[0][1]
         
         # Initialize explainer
-        xgb_explainer = init_shap_explainer(models_data['xgb'], models_data['X_train'], "tree")
+        xgb_explainer = init_shap_explainer(models_data[selected_disease]['xgb'], models_data[selected_disease]['X_train'], "tree")
         
         # Calculate SHAP values
         shap_values = xgb_explainer(sample_data)
@@ -642,9 +908,9 @@ elif page == "Tech & Documentation":
         plt.tight_layout()
         st.pyplot(fig)
         
-        st.markdown(f"**Prediction for this sample: {sample_pred:.1%} risk**")
+        st.markdown(f"**Prediction for this sample: {sample_pred:.1%} risk of {selected_disease}**")
 
-# Feedback page
+# Feedback page (similar to before)
 elif page == "Feedback":
     st.markdown('<h2 class="sub-header">Feedback & Contact</h2>', unsafe_allow_html=True)
     
