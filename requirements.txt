@@ -6,3 +6,10 @@ xgboost
 shap
 matplotlib
 plotly
+transformers
+torch
+torchvision
+torchaudio
+sentence-transformers
+requests
+
