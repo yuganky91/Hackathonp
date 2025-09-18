@@ -12,4 +12,6 @@ torchvision
 torchaudio
 sentence-transformers
 requests
+beautifulsoup4
 
+ 
