@@ -1,3 +1,5 @@
+# First, let's install necessary packages
+# pip install streamlit pandas numpy scikit-learn xgboost shap matplotlib plotly transformers torch torchvision torchaudio sentence-transformers requests beautifulsoup4
 
 import streamlit as st
 import pandas as pd
@@ -18,9 +20,10 @@ import json
 from datetime import datetime
 import re
 import requests
-from sentence_transformers import SentenceTransformer
-from transformers import pipeline
-import torch
+from bs4 import BeautifulSoup
+import time
+import joblib
+import os
 
 # Set up the page
 st.set_page_config(
@@ -30,7 +33,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Custom CSS with improved visibility
 st.markdown("""
 <style>
     .main-header {font-size: 3rem; color: #1f77b4; padding-bottom: 10px}
@@ -41,9 +44,12 @@ st.markdown("""
     .prediction-low {background-color: #ccffcc; padding: 20px; border-radius: 10px}
     .interpretation-box {background-color: #f9f9f9; padding: 15px; border-radius: 10px; margin-top: 10px}
     .footer {text-align: center; margin-top: 50px; color: #777}
-    .chat-container {background-color: #f9f9f9; padding: 15px; border-radius: 10px; max-height: 400px; overflow-y: auto}
-    .user-msg {background-color: #d1ecf1; padding: 10px; border-radius: 10px; margin-bottom: 10px; text-align: right}
-    .bot-msg {background-color: #e8f4f8; padding: 10px; border-radius: 10px; margin-bottom: 10px}
+    .chat-container {background-color: #f9f9f9; padding: 15px; border-radius: 10px; max-height: 400px; overflow-y: auto; border: 1px solid #ddd}
+    .user-msg {background-color: #d1ecf1; padding: 12px; border-radius: 10px; margin-bottom: 10px; text-align: right; color: #000000; border: 1px solid #bee5eb}
+    .bot-msg {background-color: #e8f4f8; padding: 12px; border-radius: 10px; margin-bottom: 10px; color: #000000; border: 1px solid #d1ecf1}
+    .chat-input {background-color: #ffffff; border: 2px solid #1f77b4; border-radius: 8px; padding: 12px}
+    .symptom-btn {margin: 5px; padding: 8px 16px; border-radius: 20px; background-color: #1f77b4; color: white; border: none}
+    .symptom-btn:hover {background-color: #0d5b9f}
 </style>
 """, unsafe_allow_html=True)
 
@@ -195,34 +201,230 @@ def create_shap_plots(explainer, input_data, feature_names, model_type):
 datasets = load_data()
 models_data = train_models(datasets)
 
-# Initialize chatbot model
+# Enhanced Health Chat Assistant with Internet Search
+class HealthChatAssistant:
+    def __init__(self):
+        self.trusted_sources = {
+            'who': 'https://www.who.int/health-topics/',
+            'cdc': 'https://www.cdc.gov/',
+            'nih': 'https://www.nih.gov/health-information',
+            'mayoclinic': 'https://www.mayoclinic.org/diseases-conditions',
+            'webmd': 'https://www.webmd.com/'
+        }
+        self.last_api_call = 0
+    
+    def rate_limit_check(self, min_interval=2):
+        """Ensure we don't make too many rapid requests"""
+        current_time = time.time()
+        if current_time - self.last_api_call < min_interval:
+            time.sleep(min_interval - (current_time - self.last_api_call))
+        self.last_api_call = time.time()
+    
+    def search_trusted_source(self, query, source='mayoclinic'):
+        """Search trusted medical sources for information"""
+        try:
+            self.rate_limit_check()
+            
+            # Format query for URL
+            search_query = query.replace(' ', '-').lower()
+            url = f"{self.trusted_sources[source]}{search_query}"
+            
+            # Send request
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            response = requests.get(url, headers=headers, timeout=10)
+            
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # Extract relevant content
+                paragraphs = soup.find_all('p')
+                content = ' '.join([p.get_text() for p in paragraphs[:3]])
+                
+                if content.strip():
+                    return f"According to {source.upper()}:\n\n{content[:500]}...\n\nRead more: {url}"
+                else:
+                    return f"I found information about {query} on {source.upper()}, but couldn't extract detailed content. Please visit: {url}"
+                    
+            else:
+                return f"I found information on {source}, but couldn't retrieve detailed content. Please consult a healthcare professional for specific advice."
+                
+        except Exception as e:
+            return f"I couldn't retrieve information at the moment. Please try again later or consult a healthcare professional."
+    
+    def analyze_symptoms(self, text):
+        """Enhanced symptom analysis with better pattern matching"""
+        symptoms_found = {}
+        text_lower = text.lower()
+        
+        # Comprehensive symptom mapping with patterns
+        symptom_patterns = {
+            'chest pain': [
+                r'chest.*(pain|discomfort|pressure|tightness|ache)',
+                r'(heart|pectoral|sternum).*hurt',
+                r'angina', r'myocardial'
+            ],
+            'shortness of breath': [
+                r'(shortness|difficulty|trouble|hard).*breath',
+                r'breathless', r'dyspnea', r'cannot.*breathe',
+                r'gasping.*air', r'suffocating'
+            ],
+            'high blood sugar': [
+                r'(high|elevated|increased).*(blood.*sugar|glucose)',
+                r'hyperglycemia', r'diabetes.*symptoms',
+                r'sugar.*level.*high'
+            ],
+            'frequent urination': [
+                r'(frequent|often|multiple).*urinat',
+                r'pee.*a lot', r'urinary.*frequency',
+                r'getting.*up.*night.*pee'
+            ],
+            'headache': [
+                r'headache', r'migraine', r'head.*hurt',
+                r'head.*pain', r'splitting.*head'
+            ],
+            'joint pain': [
+                r'joint.*(pain|ache|hurt|discomfort)',
+                r'arthralgia', r'knee.*pain', r'hip.*pain',
+                r'shoulder.*pain', r'wrist.*pain'
+            ],
+            'fever': [
+                r'fever', r'temperature', r'hot.*body',
+                r'chills.*sweat', r'pyrexia'
+            ],
+            'cough': [
+                r'cough', r'coughing', r'hack',
+                r'clear.*throat.*often'
+            ],
+            'nausea': [
+                r'nausea', r'feel.*sick', r'want.*vomit',
+                r'queasy', r'sick.*stomach'
+            ],
+            'dizziness': [
+                r'dizziness', r'lightheaded', r'vertigo',
+                r'room.*spinning', r'unsteady'
+            ]
+        }
+        
+        for symptom, patterns in symptom_patterns.items():
+            for pattern in patterns:
+                if re.search(pattern, text_lower):
+                    symptoms_found[symptom] = symptoms_found.get(symptom, 0) + 1
+        
+        return symptoms_found
+    
+    def generate_response(self, user_input):
+        """Generate intelligent response based on user input"""
+        # Analyze symptoms
+        symptoms = self.analyze_symptoms(user_input)
+        
+        if symptoms:
+            # If symptoms detected, provide focused response
+            response = "I understand you're experiencing some symptoms. "
+            primary_symptom = max(symptoms.items(), key=lambda x: x[1])[0]
+            
+            # Get information from trusted source
+            medical_info = self.search_trusted_source(primary_symptom)
+            
+            response += f"Based on your description of **{primary_symptom}**, here's what I found:\n\n"
+            response += medical_info
+            response += "\n\n**Please note:** This is general information only. For proper diagnosis and treatment, please consult a healthcare professional."
+            
+            if len(symptoms) > 1:
+                other_symptoms = [s for s in symptoms.keys() if s != primary_symptom]
+                response += f"\n\nI also detected these symptoms: {', '.join(other_symptoms)}"
+                
+        else:
+            # General health advice or conversation
+            response = self.handle_general_query(user_input)
+        
+        return response
+    
+    def handle_general_query(self, user_input):
+        """Handle general health queries"""
+        lower_input = user_input.lower()
+        
+        if any(word in lower_input for word in ['hello', 'hi', 'hey', 'greetings']):
+            return "Hello! 👋 I'm MediExplain AI, your health assistant. How can I help you today? You can describe your symptoms or ask health-related questions."
+        
+        elif any(word in lower_input for word in ['thank', 'thanks', 'appreciate']):
+            return "You're welcome! I'm here to help. Is there anything else you'd like to know about your health?"
+        
+        elif any(word in lower_input for word in ['what can you do', 'help', 'capabilities']):
+            return "I can help you with:\n- Symptom analysis and initial assessment\n- Health information from trusted sources\n- General health advice\n- Multi-disease risk prediction\n- Explanations of medical concepts\n\nWhat would you like to know?"
+        
+        elif '?' in user_input:
+            # Try to answer specific questions
+            if 'heart' in lower_input:
+                return self.search_trusted_source('heart disease')
+            elif 'diabet' in lower_input:
+                return self.search_trusted_source('diabetes')
+            elif 'blood pressure' in lower_input or 'hypertension' in lower_input:
+                return self.search_trusted_source('hypertension')
+            elif 'covid' in lower_input:
+                return self.search_trusted_source('covid-19')
+            elif 'asthma' in lower_input:
+                return self.search_trusted_source('asthma')
+            elif 'arthritis' in lower_input:
+                return self.search_trusted_source('arthritis')
+            else:
+                return "That's an interesting health question. While I can provide general information, for specific medical advice, it's best to consult with a healthcare professional. Would you like me to look up general information about this topic?"
+        
+        else:
+            return "Thank you for sharing. I'm here to help with health-related questions and concerns. You can describe any symptoms you're experiencing, ask about health conditions, or request general health information. How can I assist you today?"
+
+# Initialize the chatbot
 @st.cache_resource
-def load_chatbot_model():
-    # Using a simpler model for compatibility
-    try:
-        # Try to use a transformer model if available
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-        return model
-    except:
-        # Fallback to TF-IDF if transformers not available
-        return None
+def load_chatbot():
+    return HealthChatAssistant()
 
-chatbot_model = load_chatbot_model()
+health_chatbot = load_chatbot()
 
-# Symptom to disease mapping
-SYMPTOM_MAPPING = {
-    "chest pain": "Heart Disease",
-    "shortness of breath": ["Heart Disease", "Asthma"],
-    "high blood sugar": "Diabetes",
-    "frequent urination": "Diabetes",
-    "high blood pressure": "Hypertension",
-    "headache": "Hypertension",
-    "wheezing": "Asthma",
-    "coughing": "Asthma",
-    "joint pain": "Arthritis",
-    "joint stiffness": "Arthritis"
-}
+# Utility functions
+def format_chat_message(role, content):
+    """Format chat messages with proper styling"""
+    if role == "user":
+        return f'<div class="user-msg"><b>You:</b> {content}</div>'
+    else:
+        # Convert line breaks to HTML for better formatting
+        formatted_content = content.replace('\n', '<br>')
+        return f'<div class="bot-msg"><b>MediExplain AI:</b> {formatted_content}</div>'
+
+def validate_medical_inputs(input_values):
+    """Validate medical input ranges"""
+    warnings = []
+    
+    if input_values.get('Blood_Sugar', 0) > 200:
+        warnings.append("Blood sugar level is elevated")
+    
+    if input_values.get('Resting_BP', 0) > 140:
+        warnings.append("Resting blood pressure is high")
+    
+    if input_values.get('Cholesterol', 0) > 240:
+        warnings.append("Cholesterol level is high")
+    
+    if input_values.get('BMI', 0) > 30:
+        warnings.append("BMI indicates obesity")
+    
+    return warnings
+
+def anonymize_data(data_dict, user_id):
+    """Proper data anonymization for compliance"""
+    anonymized = data_dict.copy()
+    
+    # Remove or hash identifiable information
+    if 'name' in anonymized:
+        anonymized['name'] = f"patient_{hash(user_id)}"
+    
+    if 'email' in anonymized:
+        anonymized['email'] = None
+    
+    # Generalize age
+    if 'age' in anonymized:
+        age = anonymized['age']
+        anonymized['age_group'] = f"{int(age/10)*10}-{int(age/10)*10+9}"
+        del anonymized['age']
+    
+    return anonymized
 
 # Home page
 if page == "Home":
@@ -394,8 +596,13 @@ elif page == "Multi-Disease Prediction":
             # Default slider for any unexpected features
             input_values[feature] = col.slider(feature, 0, 10, 5)
     
+    # Validate inputs
+    warnings = validate_medical_inputs(input_values)
+    if warnings:
+        st.warning("**Input Validation Warnings:**\n\n" + "\n".join([f"• {w}" for w in warnings]))
+    
     # Make predictions for all selected diseases
-    if st.button("Predict Risks"):
+    if st.button("Predict Risks", type="primary"):
         results = {}
         
         for disease in selected_diseases:
@@ -540,7 +747,7 @@ elif page == "Multi-Disease Prediction":
         prediction_log = {
             "timestamp": datetime.now().isoformat(),
             "model": model_option,
-            "input_features": input_values,
+            "input_features": anonymize_data(input_values, "user_anonymous"),
             "predictions": {disease: result['probability'] for disease, result in results.items()}
         }
         
@@ -554,7 +761,7 @@ elif page == "Health Chat Assistant":
     st.markdown("""
     Describe your symptoms or health concerns in natural language, and our AI assistant will:
     - Analyze your description for potential health risks
-    - Provide initial risk assessments for relevant diseases
+    - Provide information from trusted medical sources
     - Offer guidance on next steps
     - Answer health-related questions
     """)
@@ -563,7 +770,7 @@ elif page == "Health Chat Assistant":
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
     
-    # Display chat history
+    # Display chat history with improved UI
     st.markdown("### Conversation")
     chat_container = st.container()
     
@@ -573,81 +780,76 @@ elif page == "Health Chat Assistant":
             if msg["role"] == "user":
                 st.markdown(f'<div class="user-msg"><b>You:</b> {msg["content"]}</div>', unsafe_allow_html=True)
             else:
-                st.markdown(f'<div class="bot-msg"><b>MediExplain AI:</b> {msg["content"]}</div>', unsafe_allow_html=True)
+                # Format bot response with better readability
+                formatted_content = msg["content"].replace('\n', '<br>')
+                st.markdown(f'<div class="bot-msg"><b>MediExplain AI:</b> {formatted_content}</div>', unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
     
-    # User input
-    user_input = st.text_input("Describe your symptoms or ask a question:", key="user_input")
+    # User input with improved styling
+    user_input = st.text_input("Describe your symptoms or ask a question:", 
+                              key="chat_input",
+                              value=st.session_state.get("chat_input", ""),
+                              placeholder="Type your symptoms or health question here...")
     
-    if st.button("Send") and user_input:
+    col1, col2 = st.columns([1, 6])
+    
+    with col1:
+        send_button = st.button("Send", use_container_width=True, type="primary")
+    
+    with col2:
+        clear_button = st.button("Clear Chat", use_container_width=True)
+    
+    if clear_button:
+        st.session_state.chat_history = []
+        st.session_state.chat_input = ""
+        st.rerun()
+    
+    if (send_button or user_input) and user_input.strip():
         # Add user message to chat history
         st.session_state.chat_history.append({"role": "user", "content": user_input})
         
-        # Process user input
-        response = ""
-        
-        # Check for specific symptoms and provide risk assessment
-        detected_diseases = set()
-        for symptom, disease in SYMPTOM_MAPPING.items():
-            if symptom in user_input.lower():
-                if isinstance(disease, list):
-                    detected_diseases.update(disease)
-                else:
-                    detected_diseases.add(disease)
-        
-        if detected_diseases:
-            response += "Based on your description, I've detected symptoms that may be related to the following conditions:\n\n"
-            for disease in detected_diseases:
-                response += f"- **{disease}**: {DISEASES[disease]['description']}\n"
-            
-            response += "\nFor a more accurate assessment, I recommend using our detailed risk prediction tool where you can provide specific health metrics."
-        else:
-            # General health advice
-            response = "Thank you for sharing your health concerns. While I can provide general information, it's important to consult with a healthcare professional for personalized medical advice.\n\n"
-            
-            # Check if user is asking a question
-            if "?" in user_input:
-                response += "Based on your question, here's some general information:\n\n"
-                
-                if "heart" in user_input.lower():
-                    response += "Heart health can be maintained through regular exercise, a balanced diet low in saturated fats, and managing stress levels. Regular check-ups are important, especially if you have a family history of heart disease."
-                elif "diabet" in user_input.lower():
-                    response += "Diabetes management typically involves monitoring blood sugar levels, maintaining a healthy diet, regular physical activity, and following your healthcare provider's recommendations for medication if prescribed."
-                elif "blood pressure" in user_input.lower():
-                    response += "Healthy blood pressure can be maintained through reducing sodium intake, regular exercise, maintaining a healthy weight, and limiting alcohol consumption."
-                elif "exercise" in user_input.lower():
-                    response += "Most adults should aim for at least 150 minutes of moderate-intensity aerobic activity or 75 minutes of vigorous-intensity activity per week, plus muscle-strengthening activities on 2 or more days."
-                else:
-                    response += "For the most accurate assessment of your health concerns, I recommend using our detailed risk prediction tool or consulting with a healthcare provider."
-            else:
-                response += "I've analyzed your symptoms but didn't detect specific patterns associated with common conditions we monitor. This could be because:\n\n"
-                response += "1. Your symptoms may be related to a condition not in our current monitoring list\n"
-                response += "2. You may need to provide more specific details about your symptoms\n"
-                response += "3. Your symptoms may be mild or related to temporary factors\n\n"
-                response += "I recommend using our detailed risk assessment tool for a more comprehensive evaluation, or consulting with a healthcare provider if symptoms persist."
+        # Generate bot response
+        with st.spinner("Analyzing your symptoms..."):
+            response = health_chatbot.generate_response(user_input)
         
         # Add bot response to chat history
         st.session_state.chat_history.append({"role": "assistant", "content": response})
         
+        # Clear input field
+        st.session_state.chat_input = ""
+        
         # Rerun to update the chat display
         st.rerun()
     
-    # Quick symptom buttons
+    # Quick symptom buttons with fixed implementation
     st.markdown("### Common Symptoms")
-    col1, col2, col3 = st.columns(3)
-    
     common_symptoms = [
         "Chest pain", "Shortness of breath", "High blood sugar",
-        "Frequent urination", "Headache", "Joint pain"
+        "Frequent urination", "Headache", "Joint pain",
+        "Fever", "Cough", "Nausea", "Dizziness"
     ]
     
+    cols = st.columns(5)
     for i, symptom in enumerate(common_symptoms):
-        col = col1 if i % 3 == 0 else col2 if i % 3 == 1 else col3
-        if col.button(symptom):
-            st.session_state.user_input = f"I'm experiencing {symptom.lower()}"
+        col_idx = i % 5
+        if cols[col_idx].button(symptom, key=f"symptom_{i}", use_container_width=True):
+            st.session_state.chat_input = f"I'm experiencing {symptom.lower()}"
             st.rerun()
+    
+    # Trusted sources information
+    with st.expander("ℹ️ About Our Information Sources"):
+        st.markdown("""
+        Our chatbot retrieves information from trusted medical sources including:
+        - World Health Organization (WHO)
+        - Centers for Disease Control and Prevention (CDC)
+        - National Institutes of Health (NIH)
+        - Mayo Clinic
+        - WebMD
+        
+        **Disclaimer:** This information is for educational purposes only and should not replace professional medical advice. Always consult with a healthcare provider for diagnosis and treatment.
+        """)
 
-# Compliance Center page (similar to before)
+# Compliance Center page
 elif page == "Compliance Center":
     st.markdown('<h2 class="sub-header">Regulatory Compliance Center</h2>', unsafe_allow_html=True)
     
@@ -776,7 +978,7 @@ elif page == "Compliance Center":
         fig.update_layout(title="Security Metrics Score (%)")
         st.plotly_chart(fig, use_container_width=True)
 
-# Tech & Documentation page (similar to before)
+# Tech & Documentation page
 elif page == "Tech & Documentation":
     st.markdown('<h2 class="sub-header">Technology & Documentation</h2>', unsafe_allow_html=True)
     
@@ -910,7 +1112,7 @@ elif page == "Tech & Documentation":
         
         st.markdown(f"**Prediction for this sample: {sample_pred:.1%} risk of {selected_disease}**")
 
-# Feedback page (similar to before)
+# Feedback page
 elif page == "Feedback":
     st.markdown('<h2 class="sub-header">Feedback & Contact</h2>', unsafe_allow_html=True)
     
