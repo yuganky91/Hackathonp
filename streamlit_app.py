@@ -1,5 +1,3 @@
-# First, let's install necessary packages
-# pip install streamlit pandas numpy scikit-learn xgboost shap matplotlib plotly transformers torch torchvision torchaudio sentence-transformers requests beautifulsoup4
 
 import streamlit as st
 import pandas as pd
